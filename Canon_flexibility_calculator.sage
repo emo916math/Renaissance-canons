@@ -9,6 +9,8 @@ EXAMPLES:
   fourthUp = CanonicScheme([(1,3), (0,0)], bass = 1)
   josquin = CanonicScheme([(1,0), (3,3), (0,0), (2,3)], bass = 3)
   josquinDouble = CanonicScheme([(2,0), (6,3), (0,0), (4,3)], bass = 3)
+  fib_canon = CanonicScheme([(0,0),(1,-8),(3,0)], bass = 1)
+  primi_toni = CanonicScheme([(0,0),(7,-7),(8,-4)])
   sicut_cervus = CanonicScheme([(7,0), (4,4), (0,0)], bass = 2)
   sicut_cervus_p = CanonicScheme([(7,0), (4,4), (0,0)], bass = 2, parallel = True)
   sicut_cervus_r = sicut_cervus.retrograde();
@@ -32,6 +34,7 @@ class CanonicScheme:
   
   _flex = None;
   _weights = None;
+  _Vn_cache = {0:1, 1:7};
   
   """
   Creates a new canonic scheme.
@@ -41,9 +44,9 @@ class CanonicScheme:
   - ``tp`` -- a list of pairs (t,p) representing time and pitch displacements
     for each voice. The t-values should be nonnegative integers; the p-values
     can be integers or elements of the finite field GF(7).
-  - ``bass`` -- which voice to choose as bass (i.e. the other voices cannot be
+  - ``bass`` -- which voice to choose as bass, (i.e. the other voices cannot be
     a fourth above it), or ``None`` to choose no such voice (as in an
-    accompanied canon).
+    accompanied canon). Voices are numbered starting from 0 for the first voice.
   - ``parallel`` -- whether to enforce the prohibition on parallel octaves and
     fifths.
     
@@ -78,15 +81,16 @@ class CanonicScheme:
   
   """
   Checks whether the first and last notes of the given ``melody`` are valid for
-  this scheme. A helper method for ``all_canons`` and ``random_canon``.
+  this scheme. A helper method for ``is_valid``, ``all_canons`` and ``random_canon``.
   """
+  
   def ends_valid(self, melody, verbose=False):
     tp = self._tp;
     # self.display(melody);
     melody = [F7(x) for x in melody]
     mlen = len(melody);
-    for i in [0..len(tp) - 2]:
-      for j in [i+1..len(tp) - 1]:
+    for i in [0 .. len(tp) - 2]:
+      for j in [i+1 .. len(tp) - 1]:
         diff = tp[j][0] - tp[i][0];
         dissTest = False;
         parallelTest = False;
@@ -136,9 +140,22 @@ class CanonicScheme:
     return True;
   
   """
-  Computes the set of all valid canons for this scheme of length ``n``. If the
-  optional argument ``double`` is set to ``True'', returns the canons of lengths
-  ``n`` and ``n-1`` as a pair of sets.
+  Determines whether the given melody is a valid canon for this scheme.
+  If the optional argument ``verbose`` is set to ``True``, then a reason for
+  the invalidity is printed if it is not valid.
+  """
+  def is_valid(self, melody, verbose=False):
+    for k in [0..len(melody) - 1]:
+      for l in [k+1..len(melody)]:
+        if not self.ends_valid(melody[k:l], verbose=verbose):
+          return False;
+    return True;
+  
+  """
+  Computes the set of all valid canons for this scheme of length ``n`` with
+  first note 0 (so the returned set is 7 times smaller than the actual set of
+  valid canons). If the optional argument ``double`` is set to ``True'', returns
+  the canons of lengths  ``n`` and ``n-1`` as a pair of sets.
   """
   def all_canons(self, n, double=False, verbose=False):
     if n <= 0:
@@ -153,23 +170,24 @@ class CanonicScheme:
           if (tuple(new[i] - new[1] for i in [1..len(new) - 1]) in prev
               and self.ends_valid(new)):
             ret.add(new);
+      self._Vn_cache.update({nn : 7*len(ret)});
       if verbose:
-        print("For length", nn, "there are", len(ret), "canons");
+        print("For length", nn, "there are", 7*len(ret), "canons");
     if double:
       return ret, prev;
     return ret;
   
   """
-  Computes the time order of this canonic scheme (``s + 1`` in the notation of
-  Theorem 6.1 in the paper).
+  Computes the total time displacement of this canonic scheme (``s`` in the
+  notation of Theorem 6.1 in the paper).
   """
-  def t_order(self):
+  def time_disp(self):
     tlist = [t for (t,p) in self._tp];
     if self._parallel:
-      t_order = max(tlist) - min(tlist) + 2;
+      time_disp = max(tlist) - min(tlist) + 1;
     else:
-      t_order = max(tlist) - min(tlist) + 1;
-    return t_order;
+      time_disp = max(tlist) - min(tlist);
+    return time_disp;
   
   """
   Computes the matrix of this scheme (A_S in the paper)
@@ -190,16 +208,49 @@ class CanonicScheme:
     if self._graph is not None:
       return self._graph;
     
-    t_order = self.t_order();
-    edges, nodes = self.all_canons(t_order, double=True, verbose=verbose);
+    time_disp = self.time_disp();
+    edges, nodes = self.all_canons(time_disp + 1, double=True, verbose=verbose);
     self._nodes = list(nodes)
     self._edges = list(edges)
     self._graph = DiGraph(
       [nodes, [(edge[:-1], tuple(x - edge[1] for x in edge[1:]), edge)
       for edge in edges]],
-        format='vertices_and_edges', loops=True, immutable=True)
+        format='vertices_and_edges', loops=True, multiedges=True,
+        immutable=True)
     return self._graph
-
+  """
+  Computes the number of valid canons of length n for this scheme (V_n(S) in the
+  paper). For small n, this is done by enumerating all valid canons. For n at
+  least the time order s, we do it by computing powers of the adjacency matrix
+  as in Section 6 of the paper.
+  """
+  def Vn(self, n, float_out=False):
+    if n not in ZZ or n < 0:
+      raise ValueError(n);
+    cached = self._Vn_cache.get(n);
+    if cached is not None:
+      return cached;
+    s = self.time_disp();
+    if n < s:
+      return 7*len(self.all_canons(n));
+    if float_out:
+      M = self.matrix().change_ring(RR);
+      all_ones = vector([1.0]*M.nrows());
+    else:
+      M = self.matrix();
+      all_ones = vector([1]*M.nrows());
+    if n-s > M.nrows():
+      ret = 7*all_ones * M^(n-s) * all_ones;
+      self._Vn_cache.update({n : ret});
+      return ret;
+    else:
+      v = all_ones;
+      for it in range(s,n):
+        v = v*M;
+        if self._Vn_cache.get(it) is not None:
+          self._Vn_cache.update({it : 7*sum(v)})
+      return 7*sum(v);
+    
   """
   Computes the sizes of the strongly connected components of this scheme
   (G_i in the paper)
@@ -285,8 +336,8 @@ class CanonicScheme:
     edges = self._edges;
     flex, weights = self.flex()
     
-    node_length = self.t_order() - 1;
-    if len(start) < node_length:
+    s = self.time_disp();
+    if len(start) < s:
       start0 = tuple(x - start[0] for x in start)
       snodes = [node for node in nodes if node[0:len(start)] == start0];
       if len(snodes) == 0:
@@ -302,7 +353,7 @@ class CanonicScheme:
       node = snodes[idx];
     else:
       ret = start;
-      node = tuple(x - start[-node_length] for x in start[-node_length:])
+      node = tuple(x - start[-s] for x in start[-s:])
     
     while len(ret) < n:
       edg = self.graph().outgoing_edges(node);
@@ -316,7 +367,7 @@ class CanonicScheme:
       while total < rand:
         idx += 1;
         total += vec[idx];
-      ret += (snodes[idx][-1] - snodes[idx][0] + ret[-node_length + 1],);
+      ret += (snodes[idx][-1] - snodes[idx][0] + ret[-s + 1],);
       node = snodes[idx];
       
     if display:
